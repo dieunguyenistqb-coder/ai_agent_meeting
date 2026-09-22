@@ -1,0 +1,4 @@
+Ngày họp: 22-09-2026
+Người mẫu A: Tôi sẽ viết tài liệu demo trước ngày 25/09/2026.
+Người mẫu B: Tôi sẽ kiểm tra tài liệu sau khi A viết xong.
+Người mẫu A: Thống nhất dùng dữ liệu giả lập cho buổi thử nghiệm.
