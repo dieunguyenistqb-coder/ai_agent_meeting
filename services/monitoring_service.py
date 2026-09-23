@@ -15,8 +15,12 @@ class MonitoringService:
             rows.append(dict(type=kind, task_id=item['task_id'], item=item['item_id'],
                              message=message, timestamp=now(), target=target))
         for task in self.tasks.list_tasks():
-            if task['status'] == 'done':
+            if task['status'] in ('done', 'completed'):
                 continue
+            if not task.get('owners'):
+                add(task, 'unassigned', 'Công việc chưa có người phụ trách.')
+            if not task.get('deadline'):
+                add(task, 'missing deadline', 'Công việc chưa có hạn hoàn thành.')
             if task['status'] == 'blocked':
                 add(task, 'blocked task', 'Task đang blocked; cần kiểm tra trạng thái/phụ thuộc.')
                 continue

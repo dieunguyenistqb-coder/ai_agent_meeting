@@ -1,6 +1,6 @@
 # Meeting Task Extractor
 
-LLM & Agent Logic Dashboard — staging Phase 1:
+LLM & Agent Logic Dashboard — staging:
 Upload TXT → Gemini extraction → schema/business validation → Decision Policy → kết quả → download JSON.
 
 ## Source và phạm vi
@@ -10,9 +10,9 @@ Upload TXT → Gemini extraction → schema/business validation → Decision Pol
 - `src/pipeline.py`: pipeline + retry hiện có, không thay đổi nghiệp vụ.
 - `src/schemas.py`, `src/schema_validator.py`, `src/decision_policy.py`: schema/validation/policy hiện có.
 - `ui/staging.py`: secrets, đăng nhập, upload, download, bộ đếm session, che secrets trong lỗi.
-- `ui/operations.py`, `services/`: các màn hình quản lý demo có sẵn; **ẩn mặc định** trong `config.py`.
+- `ui/operations.py`, `services/`: các màn hình quản lý demo có sẵn; **bật mặc định** trong `config.py`, chỉ thay đổi session.
 - `run.py`: single-file/batch; `evaluation/`: evaluation offline. Hai luồng này giữ nguyên.
-- Ask Transcript **chưa có trong source** và chưa triển khai ở staging; bộ đếm Ask giữ 0.
+- Ask Transcript **chưa có trong source** và chưa triển khai ở staging; không có menu hỏi đáp.
 - Không kết nối n8n, PostgreSQL, email hoặc Calendar.
 
 ## Chạy local
@@ -142,3 +142,17 @@ python -m evaluation.evaluator --pred-dir outputs/batch --gt-dir data/ground_tru
 Những đường dẫn `data/`, `outputs/` ở trên là dữ liệu riêng trên máy local, không đưa lên GitHub.
 CLI vẫn dùng environment/.env, không yêu cầu APP_PASSWORD; web luôn yêu cầu đăng nhập.
 Xem `evaluation/README.md` cho định nghĩa metrics và giới hạn match theo item_id.
+
+## Luồng minh họa staging
+
+Sáu menu: Transcript → Kết quả trích xuất → Kiểm tra JSON → Xác nhận thủ công → Danh sách công việc → Theo dõi & cảnh báo.
+Ba trang cuối chỉ mô phỏng trong session, không có database, n8n hay notification nền.
+`Tải dữ liệu demo` chỉ xuất hiện khi chưa có upload/kết quả; dữ liệu viết tay hoàn toàn giả lập.
+Demo không chạy API/validation và được gắn nhãn riêng. Upload mới thay thế demo;
+review/edit không sửa raw/final snapshot. `Đặt lại phiên demo` yêu cầu checkbox xác nhận,
+xóa dữ liệu nhưng giữ đăng nhập và ngân sách API. Đăng xuất vẫn xóa dữ liệu phiên.
+Status `completed` chỉ dành cho task session UI; vẫn hỗ trợ `done`/`ready` đã có,
+không sửa enum/schema của pipeline. Cảnh báo dùng ngày local server hiện tại như trước,
+không suy đoán deadline; blocked chỉ cảnh báo trạng thái, không nhắc hoàn thành.
+Sau push main, kiểm tra Manage app trên ứng dụng Cloud hiện có để xác nhận redeploy;
+không tạo app mới. Chỉ xác nhận deployment khi health/app của URL thực tế đã được kiểm tra.

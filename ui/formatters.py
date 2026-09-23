@@ -7,7 +7,7 @@ STATUS_LABELS = {'not_started': 'Chưa bắt đầu', 'in_progress': 'Đang th�
 CONTENT_TYPE_LABELS = {'task_candidate': 'Công việc cần xác minh', 'information': 'Thông tin',
                        'decision': 'Quyết định', 'proposal': 'Đề xuất'}
 DECISION_LABELS = {'confirmed': 'Đã xác nhận', 'human_review': 'Cần con người kiểm tra',
-                   'not_task': 'Không phải công việc'}
+                   'not_task': 'Không phải công việc', 'rejected': 'Đã từ chối'}
 COMMITMENT_LABELS = {'explicit': 'Rõ ràng', 'tentative': 'Dự kiến', 'implicit': 'Ngầm định',
                      'ambiguous': 'Chưa rõ ràng', 'not_applicable': 'Không áp dụng'}
 

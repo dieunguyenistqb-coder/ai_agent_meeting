@@ -100,7 +100,7 @@ class ServiceTests(unittest.TestCase):
             at.button[0].click().run()
             navigate(at, 'Human Review')
             self.assertFalse(at.exception)
-            next(b for b in at.button if b.label == 'Confirm').click().run()
+            next(b for b in at.button if b.label == 'Xác nhận').click().run()
             self.assertFalse(at.exception)
             navigate(at, 'Task Dashboard')
             self.assertEqual(at.metric[0].value, '1')

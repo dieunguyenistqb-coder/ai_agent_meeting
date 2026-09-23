@@ -11,8 +11,9 @@ from services.review_service import ReviewService
 from services.task_service import TaskService
 from services.monitoring_service import MonitoringService
 from src.request_context import gemini_request
-from ui import staging
-from ui.operations import review_screen, dashboard, task_detail, monitoring
+from ui import staging, demo
+from ui.operations import review_screen, dashboard, task_detail, monitoring, item_card
+from ui.formatters import CONTENT_TYPE_LABELS, label as format_label
 
 import streamlit as st
 from pydantic import ValidationError
@@ -151,6 +152,9 @@ def extract(transcript, meeting_id, meeting_date, evidence):
         return
     st.session_state.extraction_busy = True
     st.session_state.extraction_count += 1
+    if st.session_state.get('data_source') == 'demo':
+        st.session_state.demo_store = new_store()
+    st.session_state.data_source = 'extraction'
     clear_result()
     st.session_state.result_input = (transcript, meeting_id, meeting_date, evidence)
     try:
@@ -183,6 +187,7 @@ def remember_upload():
 
 def render_transcript():
     st.subheader("Transcript input")
+    st.caption("Hoạt động — Gemini chỉ được gọi khi bấm Run Extraction.")
     left, right = st.columns([1, 2], gap="large")
     with left:
         uploaded = st.file_uploader("Upload transcript (.txt)", type=["txt"],
@@ -198,10 +203,18 @@ def render_transcript():
                 transcript = staging.upload_text(uploaded)
             except ValueError as error:
                 input_error = str(error)
+        if uploaded is not None:
+            st.caption(f'{uploaded.name} · {len(uploaded.getvalue()):,} bytes · {len(transcript.splitlines())} dòng')
+        if st.session_state.get('data_source') != 'demo':
+            st.session_state.transcript = transcript
         identity = (uploaded.name, uploaded.getvalue()) if uploaded is not None else None
         if identity != st.session_state.get("upload_identity"):
             st.session_state.upload_identity = identity
             clear_result()
+            if st.session_state.get('data_source') == 'demo':
+                st.session_state.demo_store = new_store()
+                st.session_state.data_source = 'extraction'
+                st.info('Đã thay dữ liệu minh họa bằng transcript mới.')
             st.session_state.meeting_id = Path(uploaded.name).stem if uploaded else ""
             st.session_state.meeting_date = None
             st.session_state.metadata_error = None
@@ -235,7 +248,7 @@ def render_transcript():
                 extract(*current_input)
         if st.session_state.error_message:
             st.error(st.session_state.get("user_error_message") or friendly_error_message(None))
-        elif st.session_state.final_object is not None:
+        elif st.session_state.final_object is not None and st.session_state.get("data_source") != "demo":
             st.success("Extraction thành công. Xem Extraction Result và Validation & JSON.")
             items = staging.as_dict(st.session_state.final_object)["items"]
             counts = item_counts(items)
@@ -246,7 +259,8 @@ def render_transcript():
     with right:
         st.markdown("**Transcript preview**")
         if transcript:
-            st.code(transcript, language=None, wrap_lines=True)
+            with st.container(height=400):
+                st.code(transcript, language=None, wrap_lines=True)
         else:
             st.info("Upload file .txt để xem nội dung transcript.")
 
@@ -267,31 +281,33 @@ def render_results():
             with st.container(key=f"metric_{decision}"):
                 st.metric(label, counts[decision])
     st.caption(f"Meeting: {final.get('meeting_id')} · Date: {final.get('meeting_date') or 'Chưa xác định'}")
-    table = {field: [item[field] for item in items] for field in TABLE_FIELDS}
-    st.dataframe(table, width="stretch", hide_index=True)
-    if not items:
-        st.info("Pipeline hoàn tất; transcript không có item được trích xuất.")
-    for item in items:
-        with st.expander(f"{item['item_id']} · {item['description']}"):
-            for field in ("source_excerpt", "description", "owners", "deadline", "deadline_status",
-                          "commitment", "depends_on", "priority", "expected_decision",
-                          "temporal_warning", "review_reason"):
-                st.markdown(f"**{field}**")
-                value = item.get(field)
-                if field == "source_excerpt" and value:
-                    st.code("\n".join(value), language=None, wrap_lines=True)
-                elif field == "expected_decision" and value in DECISION_COLORS:
-                    st.markdown(f":{DECISION_COLORS[value]}[{value}]")
-                else:
-                    st.text(display_value(value))
+    selected = st.selectbox('Loại nội dung', ['all', 'task_candidate', 'information', 'decision', 'proposal'],
+                            format_func=lambda v: 'Tất cả' if v == 'all' else format_label(v, CONTENT_TYPE_LABELS))
+    visible = [item for item in items if selected == 'all' or item.get('content_type') == selected]
+    if not visible:
+        st.info('Không có item phù hợp với bộ lọc.')
+    for item in visible:
+        with st.container(border=True):
+            item_card(item)
 
 
 def render_validation():
     st.subheader("Validation & JSON")
-    for column, stage in zip(st.columns(4), STAGES):
+    stages = dict(st.session_state.pipeline_status)
+    raw = st.session_state.raw_output
+    parse_status = 'Chưa chạy'
+    if raw is not None and st.session_state.get('data_source') != 'demo':
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else staging.as_dict(raw)
+            parse_status = 'Thành công'
+        except (ValueError, TypeError):
+            parse_status = 'Thất bại'
+    stages = {STAGES[0]: stages[STAGES[0]], 'Parse JSON': parse_status, **{k: stages[k] for k in STAGES[1:]}}
+    stages = {stage: status if status in ('Thành công', 'Thất bại', 'Chưa chạy') else ('Chưa chạy' if status.startswith('Không chạy') else 'Thất bại') for stage, status in stages.items()}
+    for column, stage in zip(st.columns(5), stages):
         with column:
             st.markdown(f"**{stage}**")
-            status = st.session_state.pipeline_status[stage]
+            status = stages[stage]
             if status == "Thành công":
                 st.success(status)
             elif status in ("Thất bại", "Không hoàn tất"):
@@ -326,21 +342,20 @@ def render_validation():
                 except (ValueError, TypeError):
                     st.caption('Raw không phải JSON hợp lệ; xem nội dung nguyên văn ở trên.')
                 else:
-                    meeting_id = (st.session_state.result_input or ('', 'meeting'))[1]
+                    meeting_id = (st.session_state.result_input or ('', staging.as_dict(st.session_state.final_object).get('meeting_id', 'meeting') if st.session_state.final_object is not None else 'meeting'))[1]
                     st.download_button(f"Download {'Raw' if kind == 'raw' else 'Final'} JSON", data=data,
                                        file_name=staging.download_name(meeting_id, kind),
                                        mime='application/json', on_click='ignore', key=f'download_{kind}')
     with logs_tab:
-        for stage in STAGES:
+        for stage in stages:
             st.markdown(f"**{stage} status**")
-            st.text(st.session_state.pipeline_status[stage])
+            st.text(stages[stage])
         if st.session_state.error_message:
             st.error(st.session_state.error_message)
         else:
             st.caption("Không có lỗi được ghi nhận.")
         with st.expander('Sử dụng API trong phiên'):
             st.text(f'Extraction: {st.session_state.extraction_count} / {config.MAX_EXTRACTIONS_PER_SESSION}\n'
-                    f'Ask Transcript (chưa triển khai): {st.session_state.ask_count}\n'
                     f'Lần gọi Gemini (gồm retry): {st.session_state.gemini_call_count}')
             if st.session_state.usage_history:
                 st.json(st.session_state.usage_history)
@@ -358,10 +373,15 @@ def main():
     staging.require_login(settings)
     staging.init_usage()
     if "pipeline_status" not in st.session_state:
-        clear_result()
+        if st.session_state.get('data_source') == 'demo':
+            st.session_state.pipeline_status = dict.fromkeys(STAGES, 'Chưa chạy')
+        else:
+            clear_result()
     st.title("Meeting Task Extractor")
     st.caption("LLM & Agent Logic Dashboard")
     st.caption('Chế độ staging — Dữ liệu chỉ tồn tại trong phiên hiện tại; chưa gửi email hoặc tạo lịch.')
+    if st.session_state.get('data_source') == 'demo':
+        st.info('Dữ liệu minh họa — Không phải kết quả gọi Gemini; các bước validation chưa chạy.')
     # Preserve editable metadata while its widgets are not on the active screen.
     for key in ("meeting_id", "meeting_date"):
         if key in st.session_state:
@@ -410,6 +430,12 @@ def main():
         }}
         </style>''', unsafe_allow_html=True)
     with st.sidebar:
+        if st.session_state.final_object is None and not st.session_state.get('saved_upload'):
+            st.button('Tải dữ liệu demo', on_click=demo.load_demo, args=(st.session_state,))
+        with st.expander('Đặt lại phiên demo'):
+            confirmed_reset = st.checkbox('Tôi xác nhận xóa dữ liệu phiên', key='confirm_reset')
+            st.button('Đặt lại phiên demo', disabled=not confirmed_reset,
+                      on_click=demo.reset_session, args=(st.session_state,))
         st.button('Đăng xuất', on_click=staging.logout, key='logout')
     if "demo_store" not in st.session_state:
         st.session_state.demo_store = new_store()
@@ -428,6 +454,7 @@ def main():
             dashboard(tasks)
     elif screen == "Monitoring & Alerts":
         monitoring(MonitoringService(tasks, reviews), config.ENABLE_TASK_DASHBOARD, config.ENABLE_HUMAN_REVIEW)
+    demo.refresh_views(st.session_state)
 
 
 if __name__ == "__main__":

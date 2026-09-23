@@ -2,7 +2,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 
-STATUSES = ('not_started', 'in_progress', 'blocked', 'ready', 'done')
+STATUSES = ('not_started', 'in_progress', 'blocked', 'ready', 'done', 'completed')
 
 
 def now():
