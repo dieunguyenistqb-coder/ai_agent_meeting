@@ -1,5 +1,6 @@
 """Streamlit presentation layer for the shared transcript pipeline."""
 import argparse
+import hashlib
 import json
 import re
 from datetime import date
@@ -13,7 +14,7 @@ from services.monitoring_service import MonitoringService
 from src.request_context import gemini_request
 from ui import staging, demo
 from ui.operations import review_screen, dashboard, task_detail, monitoring, item_card
-from ui.formatters import CONTENT_TYPE_LABELS, label as format_label
+from ui.formatters import CONTENT_TYPE_LABELS, value_text, label as format_label
 
 import streamlit as st
 from pydantic import ValidationError
@@ -284,11 +285,34 @@ def render_results():
     selected = st.selectbox('Loại nội dung', ['all', 'task_candidate', 'information', 'decision', 'proposal'],
                             format_func=lambda v: 'Tất cả' if v == 'all' else format_label(v, CONTENT_TYPE_LABELS))
     visible = [item for item in items if selected == 'all' or item.get('content_type') == selected]
+    # Restore the column-oriented summary from a6fac57, using the filtered items.
+    table = {field: [value_text(item.get(field), '-') for item in visible]
+             for field in TABLE_FIELDS}
+    headings = ('Item ID', 'Content Type', 'Description / Task', 'Owner(s)',
+                'Deadline', 'Commitment', 'Depends On', 'Decision / Status')
+    # Reset row positions when the filter or extraction changes.
+    snapshot = json.dumps([selected, final], sort_keys=True, ensure_ascii=False)
+    table_key = 'extraction_summary_' + hashlib.sha256(snapshot.encode()).hexdigest()[:16]
+    event = st.dataframe(
+        table, width='stretch', hide_index=True,
+        column_config=dict(zip(TABLE_FIELDS, headings)),
+        on_select='rerun', selection_mode='single-row', key=table_key)
     if not visible:
         st.info('Không có item phù hợp với bộ lọc.')
-    for item in visible:
+        return
+    st.caption('Chọn một hàng để đưa chi tiết item đó lên đầu phần bên dưới.')
+    selected_rows = event.selection.rows
+    selected_index = selected_rows[0] if selected_rows else None
+    order = list(range(len(visible)))
+    if isinstance(selected_index, int) and selected_index in order:
+        order.remove(selected_index)
+        order.insert(0, selected_index)
+    st.subheader('Chi tiết item')
+    for index in order:
         with st.container(border=True):
-            item_card(item)
+            if index == selected_index:
+                st.caption('Item đang chọn')
+            item_card(visible[index])
 
 
 def render_validation():
