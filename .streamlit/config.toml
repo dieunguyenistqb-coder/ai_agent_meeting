@@ -4,6 +4,8 @@ primaryColor = "#2563eb"
 backgroundColor = "#f5f8fc"
 secondaryBackgroundColor = "#ffffff"
 textColor = "#172b4d"
+dataframeBorderColor = "#e1e8f2"
+dataframeHeaderBackgroundColor = "#eaf1fa"
 
 [server]
 maxUploadSize = 1

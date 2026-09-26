@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import requests
 from streamlit.testing.v1 import AppTest
 
 from src import pipeline
@@ -44,6 +45,48 @@ def navigate(at, label):
 
 
 class AppTests(unittest.TestCase):
+    def test_n8n_sends_final_json_only_on_click_and_handles_errors(self):
+        from ui.staging import as_dict
+
+        with patch("streamlit.file_uploader", return_value=upload()), patch.object(
+                pipeline, "call_llm", side_effect=response), patch(
+                "services.n8n_service.requests.post") as post:
+            at = make_app()
+            navigate(at, "Extraction Result")
+            self.assertFalse(any(b.label == "Send to Task Workflow" for b in at.button))
+            navigate(at, "Transcript")
+            at.button[0].click().run()
+            navigate(at, "Extraction Result")
+            post.assert_not_called()
+            final_json = as_dict(at.session_state["final_object"])
+            result = requests.Response()
+            result.status_code = 200
+            result._content = b"accepted"
+            post.return_value = result
+            at.button(key="send_to_task_workflow").click().run()
+            self.assertFalse(at.exception)
+            self.assertEqual(at.success[0].value, "Đã gửi dữ liệu sang n8n thành công.")
+            post.assert_called_once_with(
+                "http://localhost:5678/webhook/task-input",
+                json=final_json, timeout=30, allow_redirects=False)
+            at.run()
+            self.assertEqual(post.call_count, 1)
+
+            result.status_code = 500
+            result._content = b"workflow failed"
+            at.button(key="send_to_task_workflow").click().run()
+            self.assertFalse(at.exception)
+            self.assertIn("500", at.error[0].value)
+            self.assertTrue(any(t.value == "workflow failed" for t in at.text))
+            for error, message in (
+                    (requests.ConnectionError(), "Không kết nối được n8n"),
+                    (requests.Timeout(), "n8n không phản hồi")):
+                post.side_effect = error
+                at.button(key="send_to_task_workflow").click().run()
+                self.assertFalse(at.exception)
+                self.assertIn(message, at.error[0].value)
+            self.assertEqual(as_dict(at.session_state["final_object"]), final_json)
+
     def test_friendly_errors_and_technical_detail_only_in_logs(self):
         from src.schema_validator import OutputValidationError
         cases = [

@@ -7,12 +7,16 @@ from datetime import date
 from pathlib import Path
 
 import config
+import requests
+from services.n8n_service import N8N_WEBHOOK_URL, send_to_n8n
 from services.store import new_store, sync_meeting
 from services.review_service import ReviewService
 from services.task_service import TaskService
 from services.monitoring_service import MonitoringService
 from src.request_context import gemini_request
 from ui import staging, demo
+from ui.components import empty_state
+from ui.review_state import refresh_reviewed_json
 from ui.operations import review_screen, dashboard, task_detail, monitoring, item_card
 from ui.formatters import CONTENT_TYPE_LABELS, value_text, label as format_label
 
@@ -66,6 +70,37 @@ button[kind="primary"] { background: #2563eb; border-color: #2563eb; border-radi
 .st-key-metric_confirmed [data-testid="stMetric"] { border-top-color: #16a34a; }
 .st-key-metric_human_review [data-testid="stMetric"] { border-top-color: #d97706; }
 .st-key-metric_not_task [data-testid="stMetric"] { border-top-color: #64748b; }
+.stMainBlockContainer { padding-top: 1.8rem; padding-bottom: 2rem; }
+[data-testid="stVerticalBlock"] { gap: .65rem; }
+h1 { font-size: 1.85rem !important; letter-spacing: -.025em; padding-bottom: .3rem !important; }
+h2 { font-size: 1.3rem !important; }
+h3 { font-size: 1.12rem !important; padding-top: .45rem !important; }
+[data-testid="stCaptionContainer"] { color: #62748b; }
+[data-testid="stMetric"] { padding: 12px 16px; border-radius: 10px; }
+[data-testid="stMetricValue"] { font-size: 1.75rem; font-weight: 650; }
+[data-testid="stMetricLabel"]::before { content: '◈'; color: #64748b; margin-right: .4rem; }
+.st-key-metric_confirmed [data-testid="stMetricLabel"]::before { content: '✓'; color: #166534; }
+.st-key-metric_human_review [data-testid="stMetricLabel"]::before { content: '◷'; color: #92400e; }
+.st-key-metric_not_task [data-testid="stMetricLabel"]::before { content: '−'; }
+[data-testid="stExpander"] { padding: 2px 8px; border-radius: 10px; }
+[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 10px; background: #fff; }
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+[class*="st-key-item_metadata_"] [data-testid="stHorizontalBlock"] {
+    background: #f5f8fc; border-radius: 8px; padding: .55rem .75rem;
+}
+[class*="st-key-item_metadata_"] [data-testid="stVerticalBlock"] { gap: .15rem; }
+[class*="st-key-item_description_"] [data-testid="stText"] { font-size: 1.04rem; font-weight: 600; color: #173d78; }
+[class*="st-key-item_evidence_"] { border-left: 3px solid #d6e4f5; padding-left: .8rem; }
+[class*="st-key-item_review_reason_"] { border-top: 1px solid #e5eaf1; padding-top: .45rem; }
+.task-card { padding: 18px; margin: 8px 0 16px; border-radius: 10px; }
+.task-description { font-size: 1.2rem; margin-bottom: 12px; }
+.sidebar-tagline { margin-bottom: 10px; }
+.nav-group { border-top: 1px solid #e5eaf1; padding-top: 10px; margin: 8px 0 3px; letter-spacing: .025em; }
+.st-key-sidebar-nav button[kind="secondary"] { min-height: 2rem; padding: .35rem .6rem; }
+.empty-state { text-align: center; padding: 1.6rem 1rem; border: 1px dashed #cedbea;
+    border-radius: 12px; background: #fff; color: #173d78; }
+.empty-icon { font-size: 1.65rem; color: #5479a8; margin-bottom: .35rem; }
+.empty-state p { color: #62748b; font-size: .9rem; margin: .4rem 0 0; }
 </style>
 """
 
@@ -112,7 +147,7 @@ def friendly_error_message(error):
 
 
 def clear_result():
-    for key in ("raw_output", "validated_object", "final_object", "error_message", "user_error_message", "result_input"):
+    for key in ("raw_output", "validated_object", "final_object", "final_json", "reviewed_json", "error_message", "user_error_message", "result_input"):
         st.session_state[key] = None
     st.session_state.pipeline_status = dict.fromkeys(STAGES, "Chưa chạy")
 
@@ -175,6 +210,10 @@ def extract(transcript, meeting_id, meeting_date, evidence):
         st.session_state.raw_output = raw
         st.session_state.validated_object = validated
         st.session_state.final_object = final
+        if 'demo_store' in st.session_state:
+            st.session_state.demo_store['versions'].pop(staging.as_dict(final)['meeting_id'], None)
+            sync_meeting(st.session_state.demo_store, final)
+        refresh_reviewed_json(st.session_state)
         st.session_state.pipeline_status = dict.fromkeys(STAGES, "Thành công")
 
     finally:
@@ -263,16 +302,41 @@ def render_transcript():
             with st.container(height=400):
                 st.code(transcript, language=None, wrap_lines=True)
         else:
-            st.info("Upload file .txt để xem nội dung transcript.")
+            empty_state('↥', 'Chưa có transcript', 'Chọn Upload transcript (.txt) ở bên trái để bắt đầu.')
 
 
 def render_results():
     st.subheader("Extraction result")
-    final = st.session_state.final_object
+    final = st.session_state.get('reviewed_json')
     if final is None:
-        st.info("Chưa có kết quả extraction thành công. Chạy tại tab Transcript.")
+        final = st.session_state.get('final_json')
+    if final is None:
+        empty_state('▤', 'Chưa có kết quả extraction', 'Mở Transcript, tải file .txt và bấm Run Extraction.')
         return
     final = staging.as_dict(final)
+    if st.session_state.get('reviewed_json') is not None:
+        st.caption('Đã cập nhật sau Human Review — kết quả hiển thị và JSON gửi n8n bao gồm các thay đổi đã duyệt.')
+    if st.button("Send to Task Workflow", key="send_to_task_workflow"):
+        try:
+            with st.spinner("Đang gửi dữ liệu sang n8n…"):
+                # Temporary debug display: the same URL used by the POST service.
+                st.text(f"DEBUG n8n POST URL: {N8N_WEBHOOK_URL}")
+                response = send_to_n8n(final)
+        except requests.HTTPError as error:
+            st.error(f"n8n trả về lỗi HTTP {error.response.status_code}.")
+            st.text(error.response.text)
+        except requests.Timeout:
+            st.error("n8n không phản hồi trong thời gian chờ. Hãy kiểm tra workflow trước khi gửi lại.")
+        except requests.ConnectionError:
+            st.error("Không kết nối được n8n. Vui lòng kiểm tra n8n đang chạy tại localhost:5678 và webhook đang lắng nghe.")
+        except requests.RequestException:
+            st.error("Không thể gửi dữ liệu sang n8n. Vui lòng kiểm tra kết nối và workflow.")
+        else:
+            if 200 <= response.status_code < 300:
+                st.success("Đã gửi dữ liệu sang n8n thành công.")
+            else:
+                st.error(f"n8n trả về HTTP {response.status_code}.")
+                st.text(response.text)
     items = final["items"]
     counts = item_counts(items)
     columns = st.columns(4)
@@ -294,11 +358,11 @@ def render_results():
     snapshot = json.dumps([selected, final], sort_keys=True, ensure_ascii=False)
     table_key = 'extraction_summary_' + hashlib.sha256(snapshot.encode()).hexdigest()[:16]
     event = st.dataframe(
-        table, width='stretch', hide_index=True,
+        table, width='stretch', hide_index=True, row_height=38,
         column_config=dict(zip(TABLE_FIELDS, headings)),
         on_select='rerun', selection_mode='single-row', key=table_key)
     if not visible:
-        st.info('Không có item phù hợp với bộ lọc.')
+        empty_state('⌕', 'Không có item phù hợp với bộ lọc.', 'Chọn Tất cả trong Loại nội dung để xem các item còn lại.')
         return
     st.caption('Chọn một hàng để đưa chi tiết item đó lên đầu phần bên dưới.')
     selected_rows = event.selection.rows
@@ -465,6 +529,7 @@ def main():
         st.session_state.demo_store = new_store()
     store = st.session_state.demo_store
     sync_meeting(store, st.session_state.final_object)
+    refresh_reviewed_json(st.session_state)
     reviews, tasks = ReviewService(store), TaskService(store)
     if screens[screen] is not None:
         screens[screen]()

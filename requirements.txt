@@ -4,3 +4,4 @@ pydantic==2.13.5
 google-genai==2.24.0
 openai==3.14.1
 streamlit==1.64.0
+requests>=2.32.0,<3

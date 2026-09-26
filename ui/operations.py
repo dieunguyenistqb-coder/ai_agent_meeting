@@ -3,6 +3,8 @@ from html import escape
 from .formatters import value_text, label as format_label, task_code, STATUS_LABELS, CONTENT_TYPE_LABELS, DECISION_LABELS, COMMITMENT_LABELS
 import streamlit as st
 from services.store import STATUSES
+from .components import decision_badge, empty_state
+from .review_state import refresh_reviewed_json
 
 
 def banner():
@@ -30,6 +32,10 @@ def edit_form(key, item, label, save):
 
 
 def review_screen(service):
+    def decide(key, action, changes=None):
+        service.decide(key, action, changes)
+        refresh_reviewed_json(st.session_state)
+
     st.subheader('Xác nhận thủ công')
     st.caption('Mô phỏng Human-in-the-loop — Kết quả chỉ tồn tại trong phiên hiện tại.')
     banner()
@@ -38,22 +44,20 @@ def review_screen(service):
     a.metric('Items to review', len(pending))
     b.metric('Reviewed today (UTC)', service.reviewed_today())
     if not pending:
-        st.info('Không có item chờ review trong session. Chạy extraction để nạp dữ liệu.')
+        empty_state('✓', 'Không có item chờ review', 'Mở Transcript và chạy extraction để nạp kết quả mới.')
         return
     for item in pending:
         key = item['task_id']
         with st.expander(f"{item['meeting_id']} · {item['item_id']} · {item['description']}"):
             item_card(item)
-            st.text(item.get('review_reason') or '—')
-            st.code('\n'.join(item['source_excerpt']), language=None, wrap_lines=True)
             a, b = st.columns(2)
             if a.button('Xác nhận', key=f'confirm:{key}'):
-                service.decide(key, 'confirm'); st.rerun()
+                decide(key, 'confirm'); st.rerun()
             if b.button('Từ chối', key=f'reject:{key}'):
-                service.decide(key, 'reject'); st.rerun()
+                decide(key, 'reject'); st.rerun()
             with st.expander('Chỉnh sửa'):
                 edit_form(f'review_edit:{key}', item, 'Lưu và xác nhận',
-                          lambda changes, key=key: service.decide(key, 'edit', changes))
+                          lambda changes, key=key: decide(key, 'edit', changes))
 
 
 def dashboard(service):
@@ -76,7 +80,7 @@ def dashboard(service):
     elif status == 'overdue':
         filtered = [i for i in filtered if is_overdue(i)]
     if not filtered:
-        st.info('Không có task phù hợp. Task confirmed từ extraction/review sẽ xuất hiện tại đây.')
+        empty_state('▤', 'Không có task phù hợp', 'Kiểm tra bộ lọc hoặc xác nhận item trong Human Review để thêm công việc.')
         return
     st.dataframe([{'Mã công việc': task_code(i), 'Mô tả': value_text(i.get('description')), 'Người phụ trách': value_text(i.get('owners'), 'Chưa phân công'), 'Hạn hoàn thành': value_text(i.get('deadline'), 'Chưa xác định'), 'Trạng thái': format_label(i.get('status'), STATUS_LABELS)} for i in filtered], hide_index=True, width='stretch')
     for task in filtered:
@@ -150,7 +154,7 @@ def monitoring(service, task_enabled, review_enabled):
         col.metric(label, sum(a['type'] == kind for a in alerts))
     st.caption('Preview tính theo ngày hiện tại; Due Soon ≤ 3 ngày. Timestamp là thời điểm kiểm tra. Chưa có dữ liệu hàng đợi email/automation.')
     if not alerts:
-        st.info('Không có alert từ dữ liệu session.'); return
+        empty_state('✓', 'Không có cảnh báo trong phiên', 'Mở Danh sách công việc để xem trạng thái các task.'); return
     st.dataframe([{k: a[k] for k in ('type', 'item', 'message', 'timestamp')} for a in alerts], hide_index=True, width='stretch')
     for index, alert in enumerate(alerts):
         a, b = st.columns([5, 1])
@@ -173,14 +177,25 @@ def is_overdue(item):
 
 def item_card(item):
     """Presentation only; never updates the extraction snapshot."""
-    st.text(value_text(item.get('description')))
+    card_key = f"{item.get('meeting_id', '')}_{item.get('item_id', '')}"
+    decision_badge(item.get('expected_decision'))
+    with st.container(key=f'item_description_{card_key}'):
+        st.text(value_text(item.get('description')))
     fields = [('Mã item', value_text(item.get('item_id'))),
               ('Người phụ trách', value_text(item.get('owners'), 'Chưa phân công')),
               ('Hạn hoàn thành', value_text(item.get('deadline'), 'Chưa xác định')),
               ('Loại nội dung', format_label(item.get('content_type'), CONTENT_TYPE_LABELS)),
               ('Mức độ cam kết', format_label(item.get('commitment'), COMMITMENT_LABELS)),
-              ('Phụ thuộc', value_text(item.get('depends_on'))),
-              ('Trích dẫn cuộc họp', value_text(item.get('source_excerpt')))]
-    for heading, value in fields:
-        st.caption(heading)
-        st.text(value)
+              ('Phụ thuộc', value_text(item.get('depends_on')))]
+    with st.container(key=f'item_metadata_{card_key}'):
+        for offset in range(0, len(fields), 3):
+            for column, (heading, value) in zip(st.columns(3), fields[offset:offset + 3]):
+                column.caption(heading)
+                column.text(value)
+    for key, heading, value in (
+        ('item_evidence', 'Trích dẫn cuộc họp', value_text(item.get('source_excerpt'))),
+        ('item_review_reason', 'Lý do cần kiểm tra', value_text(item.get('review_reason'))),
+    ):
+        with st.container(key=f'{key}_{card_key}'):
+            st.caption(heading)
+            st.text(value)

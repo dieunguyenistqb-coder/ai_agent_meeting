@@ -5,6 +5,7 @@ from services.store import new_store, sync_meeting, task_key
 from services.task_service import TaskService
 from services.review_service import ReviewService
 from services.monitoring_service import MonitoringService
+from .review_state import refresh_reviewed_json
 
 
 def reset_session(state):
@@ -13,7 +14,7 @@ def reset_session(state):
         if str(key).startswith(('review_edit:', 'task_edit:', 'status:', 'confirm:', 'reject:')):
             state.pop(key, None)
     state['confirm_reset'] = False
-    for key in ('transcript', 'raw_output', 'validated_object', 'final_object',
+    for key in ('transcript', 'raw_output', 'validated_object', 'final_object', 'final_json', 'reviewed_json',
                 'reviewed_items', 'tasks', 'alerts', 'demo_store', 'selected_task',
                 'saved_upload', 'transcript_upload', 'upload_identity', 'meeting_id',
                 'meeting_date', 'metadata_error', 'result_input', 'pipeline_status',
@@ -59,6 +60,7 @@ def refresh_views(state):
     state.setdefault('transcript', '')
     state.setdefault('demo_store', new_store())
     sync_meeting(state['demo_store'], state.get('final_object'))
+    refresh_reviewed_json(state)
     tasks = TaskService(state['demo_store'])
     reviews = ReviewService(state['demo_store'])
     state['tasks'] = tasks.list_tasks()
