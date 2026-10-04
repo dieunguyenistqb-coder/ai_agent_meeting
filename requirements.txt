@@ -5,3 +5,5 @@ google-genai==2.24.0
 openai==3.14.1
 streamlit==1.64.0
 requests>=2.32.0,<3
+
+psycopg[binary]==3.3.6

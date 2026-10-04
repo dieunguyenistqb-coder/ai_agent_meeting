@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 import unittest
 from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
@@ -73,17 +73,14 @@ class ServiceTests(unittest.TestCase):
             llm.assert_not_called()
 
     def test_dashboard_detail_and_monitoring_navigation(self):
-        with patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm', side_effect=response) as llm:
+        with patch('services.database_service.DatabaseTaskService.snapshot', side_effect=lambda include_clock=False: ([], {}, {'today': date(2026, 10, 3), 'read_at': datetime(2026, 10, 3)}) if include_clock else ([], {})), patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm', side_effect=response) as llm:
             at = make_app()
             at.button[0].click().run()
             navigate(at, 'Task Dashboard')
             self.assertFalse(at.exception)
-            next(b for b in at.button if b.label == 'View').click().run()
-            self.assertFalse(at.exception)
-            self.assertTrue(any(s.value == 'Chi tiết công việc' for s in at.subheader))
-            next(b for b in at.button if b.label == '← Quay lại danh sách').click().run()
-            self.assertFalse(at.exception)
-            navigate(at, 'Monitoring & Alerts')
+            self.assertEqual(at.metric[0].value, '0')  # Extraction is not a DB task.
+            self.assertFalse(any(b.key == 'nav_Monitoring & Alerts' for b in at.button))
+            self.assertTrue(any(b.label == 'Theo dõi công việc & cảnh báo' for b in at.button))
             self.assertFalse(at.exception)
             navigate(at, 'Human Review')
             self.assertFalse(at.exception)
@@ -95,7 +92,7 @@ class ServiceTests(unittest.TestCase):
             data = json.loads(response(payload))
             data['items'][0]['commitment'] = 'tentative'
             return json.dumps(data)
-        with patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm', side_effect=review_response):
+        with patch('services.database_service.DatabaseTaskService.snapshot', side_effect=lambda include_clock=False: ([], {}, {'today': date(2026, 10, 3), 'read_at': datetime(2026, 10, 3)}) if include_clock else ([], {})), patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm', side_effect=review_response):
             at = make_app()
             at.button[0].click().run()
             navigate(at, 'Human Review')
@@ -103,5 +100,5 @@ class ServiceTests(unittest.TestCase):
             next(b for b in at.button if b.label == 'Xác nhận').click().run()
             self.assertFalse(at.exception)
             navigate(at, 'Task Dashboard')
-            self.assertEqual(at.metric[0].value, '1')
+            self.assertEqual(at.metric[0].value, '0')  # Review alone does not persist to DB.
             self.assertEqual(at.session_state['final_object'].items[0].expected_decision, 'human_review')

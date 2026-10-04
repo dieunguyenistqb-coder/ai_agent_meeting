@@ -9,7 +9,7 @@ from .review_state import refresh_reviewed_json
 
 
 def reset_session(state):
-    # Preserve authentication and API budgets, including the existing request lock.
+    # Preserve API budgets, including the existing request lock.
     for key in list(state):
         if str(key).startswith(('review_edit:', 'task_edit:', 'status:', 'confirm:', 'reject:')):
             state.pop(key, None)

@@ -26,6 +26,10 @@ class ReviewedJsonTests(unittest.TestCase):
                 self.assertEqual(state['final_json'], original)
                 self.assertEqual(state['final_object'], original)
                 self.assertEqual(set(reviewed), set(original))
+                if action == 'reject':
+                    self.assertNotIn('ITEM002', [i['item_id'] for i in reviewed['items']])
+                    self.assertEqual(len(reviewed['items']), len(original['items']) - 1)
+                    continue
                 for before, after in zip(original['items'], reviewed['items']):
                     self.assertEqual(set(before), set(after))
                     if before['item_id'] != 'ITEM002':
@@ -36,6 +40,7 @@ class ReviewedJsonTests(unittest.TestCase):
                 expected = deepcopy(original['items'][1])
                 if action == 'edit':
                     expected.update(changes)
+                    expected['deadline_status'] = 'resolved'
                 expected.update(expected_decision=item['expected_decision'], review_reason=None)
                 self.assertEqual(item, expected)
                 refresh_views(state)
@@ -64,9 +69,9 @@ class ReviewedJsonTests(unittest.TestCase):
             self.assertTrue(any('Đã cập nhật sau Human Review' in c.value for c in at.caption))
             self.assertEqual([m.value for m in at.metric], ['3', '3', '0', '0'])
             post.assert_not_called()
-            at.button(key='send_to_task_workflow').click().run()
-            self.assertFalse(at.exception)
-            self.assertEqual(post.call_args.kwargs['json'], reviewed)
+            # Demo owners are not grounded in the fictional source excerpts.
+            self.assertTrue(at.button(key='send_to_task_workflow').disabled)
+            post.assert_not_called()
             self.assertEqual(at.session_state['final_json'], original)
             llm.assert_not_called()
             pipeline.assert_not_called()
@@ -83,8 +88,13 @@ class ReviewedJsonTests(unittest.TestCase):
                     next(t for t in at.text_input if 'Người phụ trách' in t.label).set_value('Lan, Nam')
                     next(b for b in at.button if b.label == 'Lưu và xác nhận').click().run()
                 else:
-                    next(b for b in at.button if b.label == 'Từ chối').click().run()
+                    next(b for b in at.button if b.label == 'Bỏ item').click().run()
                 self.assertFalse(at.exception)
+                if action == 'reject':
+                    self.assertNotIn('ITEM002', [i['item_id'] for i in at.session_state['reviewed_json']['items']])
+                    self.assertEqual(at.session_state['final_json'], original)
+                    llm.assert_not_called()
+                    continue
                 item = at.session_state['reviewed_json']['items'][1]
                 self.assertEqual(item['expected_decision'], 'confirmed' if action == 'edit' else 'not_task')
                 self.assertIsNone(item['review_reason'])

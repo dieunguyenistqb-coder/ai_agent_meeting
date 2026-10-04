@@ -23,8 +23,11 @@ def make_app():
     at.secrets['GEMINI_API_KEY'] = 'mock-api-key-not-a-credential'
     at.secrets['GEMINI_MODEL'] = 'gemini-3.6-flash'
     at.run()
-    at.text_input(key='login_password').set_value(TEST_PASSWORD)
-    next(b for b in at.button if b.label == 'Đăng nhập').click().run()
+    # Existing extraction tests explicitly exercise Gemini; production default is Qwen.
+    if at.radio:
+        at.radio(key='extraction_provider').set_value('gemini').run()
+    else:
+        at.session_state['extraction_provider'] = 'gemini'
     return at
 
 
@@ -77,7 +80,7 @@ class AppTests(unittest.TestCase):
             at.button(key="send_to_task_workflow").click().run()
             self.assertFalse(at.exception)
             self.assertIn("500", at.error[0].value)
-            self.assertTrue(any(t.value == "workflow failed" for t in at.text))
+            self.assertFalse(any(t.value == "workflow failed" for t in at.text))
             for error, message in (
                     (requests.ConnectionError(), "Không kết nối được n8n"),
                     (requests.Timeout(), "n8n không phản hồi")):

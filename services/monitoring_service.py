@@ -37,3 +37,30 @@ class MonitoringService:
         for item in self.reviews.pending():
             add(item, 'human review pending', item.get('review_reason') or 'Chờ review.', 'review')
         return rows
+
+
+# PostgreSQL monitoring: lifecycle statuses are separate from review statuses.
+ALERT_LABELS = {
+    'due_soon': 'Sắp đến hạn',
+    'overdue': 'Quá hạn',
+    'blocked': 'Bị chặn',
+}
+
+
+def attention_tasks(tasks, today):
+    """One card per task; overlapping groups count independently."""
+    from datetime import timedelta
+    result = []
+    for task in tasks:
+        groups = []
+        status, deadline = task['status'], task.get('deadline')
+        if status in ('ready', 'in_progress', 'blocked') and deadline is not None:
+            if deadline < today:
+                groups.append('overdue')
+            elif today <= deadline <= today + timedelta(days=3):
+                groups.append('due_soon')
+        if status == 'blocked':
+            groups.append('blocked')
+        if groups:
+            result.append(dict(task, alert_groups=groups))
+    return result

@@ -19,3 +19,9 @@ credentials*.json
 service-account*.json
 .codex/
 .agents/
+secrets.toml
+.ipynb_checkpoints/
+docs/ai_agent_meeting
+docs/ai_agent_meeting_final
+docs/ai_agent_meeting.sql
+ai_agent_meeting.sql

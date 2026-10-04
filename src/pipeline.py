@@ -60,7 +60,7 @@ class PipelineError(Exception):
 
 
 def process_transcript(transcript: str, meeting_id: str, meeting_date: str | None,
-                       meeting_date_evidence: dict | None = None
+                       meeting_date_evidence: dict | None = None, *, extractor=None
                        ) -> tuple[str, RawMeetingOutput, FinalMeetingOutput]:
     """Return (raw text, validated raw model, final model), without file writes.
 
@@ -73,7 +73,7 @@ def process_transcript(transcript: str, meeting_id: str, meeting_date: str | Non
     try:
         if not transcript.strip():
             raise ValueError("Transcript không được để trống")
-        raw_output = call_llm_with_retry({
+        raw_output = (extractor or call_llm_with_retry)({
             "transcript": transcript, "meeting_id": meeting_id,
             "meeting_date": meeting_date, "meeting_date_evidence": meeting_date_evidence,
         })

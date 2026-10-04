@@ -55,7 +55,7 @@ class DemoFlowTests(unittest.TestCase):
             next(b for b in at.button if b.label == 'Tải dữ liệu demo').click().run()
             self.assertFalse(at.exception)
             original = deepcopy(at.session_state['final_object'])
-            for screen in ('Extraction Result', 'Validation & JSON', 'Human Review', 'Task Dashboard', 'Monitoring & Alerts', 'Transcript'):
+            for screen in ('Extraction Result', 'Validation & JSON', 'Human Review', 'Task Dashboard', 'Transcript'):
                 navigate(at, screen)
                 self.assertFalse(at.exception, screen)
                 self.assertEqual(at.session_state['final_object'], original)
@@ -63,7 +63,7 @@ class DemoFlowTests(unittest.TestCase):
             at.checkbox(key='confirm_reset').check().run()
             next(b for b in at.button if b.label == 'Đặt lại phiên demo').click().run()
             self.assertFalse(at.exception)
-            self.assertTrue(at.session_state['authenticated'])
+            self.assertNotIn('authenticated', at.session_state)
             self.assertIsNone(at.session_state['final_object'])
             self.assertFalse(at.session_state['tasks'])
             llm.assert_not_called()
@@ -81,17 +81,16 @@ class DemoFlowTests(unittest.TestCase):
                 self.assertEqual(llm.call_count, 1)
 
     def test_ui_review_reject_and_status(self):
-        with patch.object(pipeline, 'call_llm') as llm:
+        with patch('services.database_service.DatabaseTaskService.snapshot', return_value=([], {}, {'today': date(2026,10,3), 'read_at': __import__('datetime').datetime(2026,10,3)})), patch.object(pipeline, 'call_llm') as llm:
             at = make_app()
             next(b for b in at.button if b.label == 'Tải dữ liệu demo').click().run()
             navigate(at, 'Human Review')
-            next(b for b in at.button if b.label == 'Từ chối').click().run()
+            next(b for b in at.button if b.label == 'Bỏ item').click().run()
             self.assertFalse(at.exception)
             self.assertEqual(len(at.session_state['tasks']), 2)
             navigate(at, 'Task Dashboard')
-            next(b for b in at.button if b.label == 'View').click().run()
-            next(s for s in at.selectbox if s.label == 'Cập nhật trạng thái').select('completed')
-            next(b for b in at.button if b.label == 'Cập nhật trạng thái').click().run()
             self.assertFalse(at.exception)
-            self.assertEqual(at.session_state['tasks'][0]['status'], 'completed')
+            self.assertEqual(at.metric[0].value, '0')
+            self.assertFalse(any(b.label == 'Lưu trạng thái' for b in at.button))
+            self.assertEqual(len(at.session_state['tasks']), 2)
             llm.assert_not_called()

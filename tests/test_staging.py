@@ -14,40 +14,32 @@ from test_app import APP, TEST_PASSWORD, make_app, navigate, response, upload
 
 
 class StagingTests(unittest.TestCase):
-    def test_missing_settings_block_app(self):
-        for api_key, password, expected in [('', TEST_PASSWORD, 'GEMINI_API_KEY'),
-                                            ('mock-key', '', 'APP_PASSWORD')]:
-            at = AppTest.from_file(APP, default_timeout=15)
-            at.secrets['GEMINI_API_KEY'] = api_key
-            at.secrets['APP_PASSWORD'] = password
-            with patch.object(pipeline, 'call_llm') as llm:
-                at.run()
-            self.assertFalse(at.exception)
-            self.assertFalse(at.get('file_uploader'))
-            self.assertFalse(at.button)
-            self.assertTrue(any(expected in e.value for e in list(at.error) + list(at.warning)))
-            llm.assert_not_called()
-
-    def test_login_logout_clears_data_preserves_budget(self):
+    def test_direct_entry_without_login_or_api_key(self):
         at = AppTest.from_file(APP, default_timeout=15)
-        at.secrets.update(APP_PASSWORD=TEST_PASSWORD, GEMINI_API_KEY='mock-key')
+        at.secrets.update(GEMINI_API_KEY='', APP_PASSWORD='')
         with patch.object(pipeline, 'call_llm') as llm:
             at.run()
-            self.assertFalse(at.get('file_uploader'))
-            at.text_input(key='login_password').set_value('wrong')
-            at.button[0].click().run()
-            self.assertTrue(at.error)
-            at.text_input(key='login_password').set_value(TEST_PASSWORD)
-            at.button[0].click().run()
+        self.assertFalse(at.exception)
+        self.assertTrue(at.get('file_uploader'))
+        self.assertFalse(any(t.key == 'login_password' for t in at.text_input))
+        self.assertFalse(any(b.label in ('Đăng nhập', 'Đăng xuất') for b in at.button))
+        llm.assert_not_called()
+
+    def test_new_session_qwen_default_and_persist_selection(self):
+        with patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm', side_effect=response) as llm:
+            at = AppTest.from_file(APP, default_timeout=15).run()
             self.assertFalse(at.exception)
-            self.assertTrue(at.session_state['authenticated'])
-            at.session_state['extraction_count'] = 2
-            at.session_state['raw_output'] = 'private meeting data'
-            next(b for b in at.button if b.key == 'logout').click().run()
-            self.assertFalse(at.get('file_uploader'))
-            self.assertEqual(at.session_state['extraction_count'], 2)
-            self.assertNotIn('raw_output', at.session_state)
-            llm.assert_not_called()
+            radio = at.radio(key='extraction_provider')
+            self.assertEqual(radio.options, ['Qwen3-8B + LoRA V6', 'Gemini API'])
+            self.assertEqual(radio.value, 'qwen_v6')
+            at.run()
+            self.assertEqual(at.radio(key='extraction_provider').value, 'qwen_v6')
+            at.radio(key='extraction_provider').set_value('gemini').run()
+            next(b for b in at.button if b.label == 'Run Extraction').click().run()
+            self.assertFalse(at.exception)
+            llm.assert_called_once()
+            at.run()
+            self.assertEqual(at.radio(key='extraction_provider').value, 'gemini')
 
     def test_upload_guards(self):
         cases = [('file.txt', b'', 'trống'), ('file.json', b'{}', '.txt'),
@@ -79,10 +71,9 @@ class StagingTests(unittest.TestCase):
             self.assertEqual(llm.call_count, 1)
 
     def test_busy_guard_and_error_redaction(self):
-        settings = staging.Settings('mock-sensitive-key', TEST_PASSWORD)
-        redacted = staging.redact_error(RuntimeError(settings.api_key + ' ' + settings.password), settings)
+        settings = staging.Settings('mock-sensitive-key')
+        redacted = staging.redact_error(RuntimeError(settings.api_key), settings)
         self.assertNotIn(settings.api_key, redacted)
-        self.assertNotIn(settings.password, redacted)
         with patch('streamlit.file_uploader', return_value=upload()), patch.object(pipeline, 'call_llm') as llm:
             at = make_app()
             lock = at.session_state['extraction_lock']

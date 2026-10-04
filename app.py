@@ -11,13 +11,14 @@ import requests
 from services.n8n_service import N8N_WEBHOOK_URL, send_to_n8n
 from services.store import new_store, sync_meeting
 from services.review_service import ReviewService
-from services.task_service import TaskService
-from services.monitoring_service import MonitoringService
+from services.database_service import DatabaseTaskService
+from ui.database_tasks import dashboard as database_dashboard
 from src.request_context import gemini_request
+from services.extraction_service import extract_meeting, QwenConnectionError
 from ui import staging, demo
 from ui.components import empty_state
 from ui.review_state import refresh_reviewed_json
-from ui.operations import review_screen, dashboard, task_detail, monitoring, item_card
+from ui.operations import review_screen, item_card
 from ui.formatters import CONTENT_TYPE_LABELS, value_text, label as format_label
 
 import streamlit as st
@@ -44,7 +45,29 @@ CSS = """
 .st-key-sidebar-nav button[kind="secondary"] {
     min-height: 2.25rem; padding: .45rem .6rem; border: 0 !important;
     border-radius: 6px; background: transparent; color: #4a5568;
-    justify-content: flex-start; align-items: center; box-shadow: none;
+    justify-content: flex-start; align-items: flex-start; text-align: left; box-shadow: none;
+}
+.st-key-sidebar-nav button[kind="secondary"] > div { width: 100%; min-width: 0; }
+.st-key-sidebar-nav button [data-has-shortcut] {
+    display: grid; grid-template-columns: 20px minmax(0, 1fr);
+    column-gap: 10px; align-items: start; justify-content: stretch;
+    width: 100%; min-width: 0; text-align: left;
+}
+.st-key-sidebar-nav button [data-has-shortcut] > :first-child {
+    grid-column: 1; width: 20px; min-width: 20px; height: 22px;
+    margin: 0; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 20px; line-height: 22px; flex-shrink: 0;
+}
+.st-key-sidebar-nav button [data-testid="stIconMaterial"] {
+    font-size: 20px; width: 20px; line-height: 22px;
+}
+.st-key-sidebar-nav button [data-testid="stMarkdownContainer"] {
+    grid-column: 2; min-width: 0; width: 100%; text-align: left;
+    white-space: normal; overflow: visible; text-overflow: clip;
+}
+.st-key-sidebar-nav button [data-testid="stMarkdownContainer"] p {
+    margin: 0; line-height: 22px; text-align: left; white-space: normal;
+    overflow: visible; text-overflow: clip; overflow-wrap: break-word;
 }
 .st-key-sidebar-nav button[kind="secondary"]:hover { background: #f0f6fd; color: #174a8b; }
 .st-key-sidebar-nav button:focus-visible { outline: 1px solid #2563eb; outline-offset: 2px; }
@@ -96,7 +119,6 @@ h3 { font-size: 1.12rem !important; padding-top: .45rem !important; }
 .task-description { font-size: 1.2rem; margin-bottom: 12px; }
 .sidebar-tagline { margin-bottom: 10px; }
 .nav-group { border-top: 1px solid #e5eaf1; padding-top: 10px; margin: 8px 0 3px; letter-spacing: .025em; }
-.st-key-sidebar-nav button[kind="secondary"] { min-height: 2rem; padding: .35rem .6rem; }
 .empty-state { text-align: center; padding: 1.6rem 1rem; border: 1px dashed #cedbea;
     border-radius: 12px; background: #fff; color: #173d78; }
 .empty-icon { font-size: 1.65rem; color: #5479a8; margin-bottom: .35rem; }
@@ -121,6 +143,8 @@ def display_value(value):
 
 def friendly_error_message(error):
     """Translate exceptions for display only; never retry or alter validation."""
+    if isinstance(error, QwenConnectionError):
+        return str(error)
     chain = []
     seen = set()
     while error is not None and id(error) not in seen:
@@ -147,7 +171,7 @@ def friendly_error_message(error):
 
 
 def clear_result():
-    for key in ("raw_output", "validated_object", "final_object", "final_json", "reviewed_json", "error_message", "user_error_message", "result_input"):
+    for key in ("raw_output", "validated_object", "final_object", "final_json", "reviewed_json", "error_message", "user_error_message", "result_input", "extraction_model"):
         st.session_state[key] = None
     st.session_state.pipeline_status = dict.fromkeys(STAGES, "Chưa chạy")
 
@@ -175,9 +199,8 @@ def failure_status(failure):
     return status
 
 
-def extract(transcript, meeting_id, meeting_date, evidence):
+def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6'):
     settings = staging.read_settings()
-    staging.require_login(settings)
     staging.init_usage()
     if st.session_state.extraction_count >= config.MAX_EXTRACTIONS_PER_SESSION:
         st.warning('Đã đạt giới hạn extraction trong phiên hiện tại.')
@@ -195,7 +218,16 @@ def extract(transcript, meeting_id, meeting_date, evidence):
     st.session_state.result_input = (transcript, meeting_id, meeting_date, evidence)
     try:
         with gemini_request(staging.request_context(settings)):
-            raw, validated, final = process_transcript(transcript, meeting_id, meeting_date, evidence)
+            def selected_extractor(payload):
+                from src.pipeline import call_llm_with_retry
+                result = extract_meeting(provider, payload['meeting_date'], payload['transcript'],
+                    meeting_id=payload['meeting_id'], meeting_date_evidence=payload['meeting_date_evidence'],
+                    gemini_call=call_llm_with_retry, model_version=settings.model)
+                st.session_state.extraction_model = {k: result[k] for k in
+                    ('provider', 'model_version', 'prompt_version')}
+                return result['raw_output']
+            raw, validated, final = process_transcript(transcript, meeting_id, meeting_date, evidence,
+                                                        extractor=selected_extractor)
     except PipelineError as failure:
         st.session_state.raw_output = failure.raw_output
         st.session_state.validated_object = failure.validated_object
@@ -227,7 +259,7 @@ def remember_upload():
 
 def render_transcript():
     st.subheader("Transcript input")
-    st.caption("Hoạt động — Gemini chỉ được gọi khi bấm Run Extraction.")
+    st.caption("Mô hình chỉ được gọi khi bấm Run Extraction.")
     left, right = st.columns([1, 2], gap="large")
     with left:
         uploaded = st.file_uploader("Upload transcript (.txt)", type=["txt"],
@@ -280,15 +312,23 @@ def render_transcript():
         exhausted = st.session_state.extraction_count >= config.MAX_EXTRACTIONS_PER_SESSION
         if exhausted:
             st.warning('Đã đạt giới hạn extraction trong phiên hiện tại.')
+        provider = st.radio('Mô hình trích xuất', ['qwen_v6', 'gemini'], index=0, horizontal=True,
+                            format_func=lambda p: {'gemini':'Gemini API', 'qwen_v6':'Qwen3-8B + LoRA V6'}[p],
+                            key='extraction_provider', disabled=st.session_state.extraction_busy)
         if st.button("Run Extraction", type="primary", disabled=(
                 exhausted or st.session_state.extraction_busy or
                 not transcript.strip() or not meeting_id.strip() or input_error is not None),
                 width="stretch"):
             with st.spinner("Đang trích xuất và kiểm tra kết quả…"):
-                extract(*current_input)
+                extract(*current_input, provider=provider)
         if st.session_state.error_message:
             st.error(st.session_state.get("user_error_message") or friendly_error_message(None))
         elif st.session_state.final_object is not None and st.session_state.get("data_source") != "demo":
+            model = st.session_state.get('extraction_model') or {}
+            if model.get('provider') == 'qwen_v6':
+                st.caption(f"Mô hình: Qwen3-8B + LoRA {model.get('model_version', '').upper()} · Prompt: {model.get('prompt_version')}")
+            else:
+                st.caption('Mô hình: Gemini API')
             st.success("Extraction thành công. Xem Extraction Result và Validation & JSON.")
             items = staging.as_dict(st.session_state.final_object)["items"]
             counts = item_counts(items)
@@ -305,6 +345,39 @@ def render_transcript():
             empty_state('↥', 'Chưa có transcript', 'Chọn Upload transcript (.txt) ở bên trái để bắt đầu.')
 
 
+
+def render_batch_submit():
+    from ui.review_state import build_submission
+    error = None
+    try:
+        build_submission(st.session_state)
+    except (ValueError, TypeError, KeyError) as exc:
+        error = str(exc)
+    if error:
+        st.warning(error)
+    if st.button('Xác nhận & gửi vào hệ thống', key='send_to_task_workflow', disabled=error is not None):
+        try:
+            # Never trust a cached payload or only the button's enabled state.
+            payload = build_submission(st.session_state)
+            with st.spinner('Đang gửi dữ liệu vào hệ thống…'):
+                response = send_to_n8n(payload)
+            if 200 <= response.status_code < 300:
+                st.success('Đã gửi dữ liệu sang n8n thành công.')
+            else:
+                st.error(f'n8n trả về HTTP {response.status_code}.')
+        except (ValueError, TypeError, KeyError) as exc:
+            st.error(str(exc))
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 'không xác định'
+            st.error(f'n8n trả về lỗi HTTP {status}.')
+        except requests.Timeout:
+            st.error('n8n không phản hồi trong thời gian chờ. Hãy kiểm tra workflow trước khi gửi lại.')
+        except requests.ConnectionError:
+            st.error('Không kết nối được n8n. Vui lòng kiểm tra kết nối.')
+        except requests.RequestException:
+            st.error('Không thể gửi dữ liệu. Vui lòng kiểm tra kết nối và workflow trước khi thử lại.')
+
+
 def render_results():
     st.subheader("Extraction result")
     final = st.session_state.get('reviewed_json')
@@ -314,29 +387,20 @@ def render_results():
         empty_state('▤', 'Chưa có kết quả extraction', 'Mở Transcript, tải file .txt và bấm Run Extraction.')
         return
     final = staging.as_dict(final)
+    model = st.session_state.get('extraction_model') or {}
+    if model.get('provider') == 'qwen_v6':
+        st.caption(f"Mô hình: Qwen3-8B + LoRA {model.get('model_version', '').upper()} · Prompt: {model.get('prompt_version')}")
+    elif model.get('provider') == 'gemini':
+        st.caption('Mô hình: Gemini API')
     if st.session_state.get('reviewed_json') is not None:
         st.caption('Đã cập nhật sau Human Review — kết quả hiển thị và JSON gửi n8n bao gồm các thay đổi đã duyệt.')
-    if st.button("Send to Task Workflow", key="send_to_task_workflow"):
-        try:
-            with st.spinner("Đang gửi dữ liệu sang n8n…"):
-                # Temporary debug display: the same URL used by the POST service.
-                st.text(f"DEBUG n8n POST URL: {N8N_WEBHOOK_URL}")
-                response = send_to_n8n(final)
-        except requests.HTTPError as error:
-            st.error(f"n8n trả về lỗi HTTP {error.response.status_code}.")
-            st.text(error.response.text)
-        except requests.Timeout:
-            st.error("n8n không phản hồi trong thời gian chờ. Hãy kiểm tra workflow trước khi gửi lại.")
-        except requests.ConnectionError:
-            st.error("Không kết nối được n8n. Vui lòng kiểm tra n8n đang chạy tại localhost:5678 và webhook đang lắng nghe.")
-        except requests.RequestException:
-            st.error("Không thể gửi dữ liệu sang n8n. Vui lòng kiểm tra kết nối và workflow.")
-        else:
-            if 200 <= response.status_code < 300:
-                st.success("Đã gửi dữ liệu sang n8n thành công.")
-            else:
-                st.error(f"n8n trả về HTTP {response.status_code}.")
-                st.text(response.text)
+    from ui.review_state import pending_batch_items
+    if pending_batch_items(st.session_state):
+        if st.button('Tiếp tục xác nhận', key='continue_review'):
+            st.session_state.navigate_to = 'Human Review'
+            st.rerun()
+    else:
+        render_batch_submit()
     items = final["items"]
     counts = item_counts(items)
     columns = st.columns(4)
@@ -458,7 +522,6 @@ def main():
     except Exception:
         st.error('Không đọc được cấu hình Secrets. Hãy kiểm tra định dạng TOML.')
         st.stop()
-    staging.require_login(settings)
     staging.init_usage()
     if "pipeline_status" not in st.session_state:
         if st.session_state.get('data_source') == 'demo':
@@ -467,11 +530,10 @@ def main():
             clear_result()
     st.title("Meeting Task Extractor")
     st.caption("LLM & Agent Logic Dashboard")
-    st.caption('Chế độ staging — Dữ liệu chỉ tồn tại trong phiên hiện tại; chưa gửi email hoặc tạo lịch.')
     if st.session_state.get('data_source') == 'demo':
         st.info('Dữ liệu minh họa — Không phải kết quả gọi Gemini; các bước validation chưa chạy.')
     # Preserve editable metadata while its widgets are not on the active screen.
-    for key in ("meeting_id", "meeting_date"):
+    for key in ("meeting_id", "meeting_date", "extraction_provider"):
         if key in st.session_state:
             st.session_state[key] = st.session_state[key]
     screens = {"Transcript": render_transcript, "Extraction Result": render_results,
@@ -480,10 +542,10 @@ def main():
         screens["Human Review"] = None
     if config.ENABLE_TASK_DASHBOARD:
         screens["Task Dashboard"] = None
-    if config.ENABLE_MONITORING:
-        screens["Monitoring & Alerts"] = None
     if "navigate_to" in st.session_state:
         st.session_state.screen = st.session_state.pop("navigate_to")
+    if st.session_state.get("screen") == "Monitoring & Alerts":
+        st.session_state.screen = "Task Dashboard"
     if st.session_state.get("screen") not in screens:
         st.session_state.screen = "Transcript"
     if not config.ENABLE_TASK_DASHBOARD:
@@ -495,8 +557,7 @@ def main():
             ("Extraction Result", "Kết quả trích xuất", ":material/analytics:"),
             ("Validation & JSON", "Kiểm tra JSON", ":material/data_object:"),
             ("Human Review", "Xác nhận thủ công", ":material/rate_review:"),
-            ("Task Dashboard", "Danh sách công việc", ":material/task_alt:"),
-            ("Monitoring & Alerts", "Theo dõi & cảnh báo", ":material/monitoring:"),
+            ("Task Dashboard", "Theo dõi công việc & cảnh báo", ":material/task_alt:"),
         ]
         with st.container(key="sidebar-nav"):
             for title, entries in (("Xử lý cuộc họp", navigation[:3]), ("Quản lý công việc", navigation[3:])):
@@ -524,25 +585,18 @@ def main():
             confirmed_reset = st.checkbox('Tôi xác nhận xóa dữ liệu phiên', key='confirm_reset')
             st.button('Đặt lại phiên demo', disabled=not confirmed_reset,
                       on_click=demo.reset_session, args=(st.session_state,))
-        st.button('Đăng xuất', on_click=staging.logout, key='logout')
     if "demo_store" not in st.session_state:
         st.session_state.demo_store = new_store()
     store = st.session_state.demo_store
     sync_meeting(store, st.session_state.final_object)
     refresh_reviewed_json(st.session_state)
-    reviews, tasks = ReviewService(store), TaskService(store)
+    reviews = ReviewService(store)
     if screens[screen] is not None:
         screens[screen]()
     elif screen == "Human Review":
-        review_screen(reviews)
+        review_screen(reviews, submit=render_batch_submit)
     elif screen == "Task Dashboard":
-        selected = st.session_state.get("selected_task")
-        if selected:
-            task_detail(tasks, selected)
-        else:
-            dashboard(tasks)
-    elif screen == "Monitoring & Alerts":
-        monitoring(MonitoringService(tasks, reviews), config.ENABLE_TASK_DASHBOARD, config.ENABLE_HUMAN_REVIEW)
+        database_dashboard(DatabaseTaskService())
     demo.refresh_views(st.session_state)
 
 
