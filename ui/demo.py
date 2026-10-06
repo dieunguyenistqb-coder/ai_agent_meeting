@@ -30,7 +30,7 @@ def demo_snapshot():
         (2, 'Chuẩn bị tài liệu hướng dẫn minh họa', [], 'human_review'),
         (3, 'Kiểm tra bản thiết kế minh họa', ['Nhân vật B'], 'confirmed')):
         items.append(dict(item_id=f'ITEM{number:03}', description=description,
-            source_excerpt=[f'Nhân vật demo: {description}.'], owners=owners,
+            source_excerpt=[f"{', '.join(owners) if owners else 'Nhân vật C, Lan, Nam'}: {description}."], owners=owners,
             deadline='2026-10-01' if number == 1 else None,
             deadline_text='01-10-2026' if number == 1 else None,
             deadline_status='resolved' if number == 1 else 'missing',

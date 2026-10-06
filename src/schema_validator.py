@@ -8,9 +8,9 @@ class OutputValidationError(ValueError):
     """Output không hợp lệ; không được chuyển sang Decision Policy."""
 
 
-def validate_business_rules(raw: RawMeetingOutput) -> None:
+def validate_business_rules(raw: RawMeetingOutput, *, human_authorized_ids=frozenset(), source_quarantine_ids=frozenset(), dependency_item_ids=None) -> None:
     errors = []
-    item_ids = {item.item_id for item in raw.items}
+    item_ids = {item.item_id for item in raw.items} if dependency_item_ids is None else set(dependency_item_ids)
     for index, item in enumerate(raw.items):
         def fail(rule: str, message: str):
             errors.append(f"items[{index}] ({item.item_id}) [{rule}]: {message}")
@@ -29,7 +29,9 @@ def validate_business_rules(raw: RawMeetingOutput) -> None:
                 fail("dependency_exists", f"depends_on reference không tồn tại: {dependency!r}")
             if dependency == item.item_id:
                 fail("no_self_dependency", "item không được phụ thuộc chính nó")
-        for owner in item.owners:
+        # Only review-session additions can omit transcript owner evidence.
+        # Extraction callers never supply this explicit authorization set.
+        for owner in ([] if item.item_id in (human_authorized_ids | source_quarantine_ids) else item.owners):
             # Match literal, case-sensitive Unicode names/labels, not PERSON5 in PERSON50.
             pattern = rf"(?<!\w){re.escape(owner)}(?!\w)"
             if not owner.strip() or not any(re.search(pattern, excerpt) for excerpt in item.source_excerpt):
@@ -38,7 +40,7 @@ def validate_business_rules(raw: RawMeetingOutput) -> None:
         raise OutputValidationError("Business validation thất bại:\n" + "\n".join(errors))
 
 
-def parse_and_validate(raw_text: str) -> RawMeetingOutput:
+def parse_and_validate(raw_text: str, *, check_business=True) -> RawMeetingOutput:
     """
     Parse output LLM và validate đúng schema.
     Pydantic sẽ báo lỗi nếu:
@@ -68,5 +70,6 @@ def parse_and_validate(raw_text: str) -> RawMeetingOutput:
             field = ".".join(map(str, location)) or "root"
             errors.append(f"{label} [{error['type']}] {field}: {error['msg']}")
         raise OutputValidationError("Schema validation thất bại:\n" + "\n".join(errors)) from exc
-    validate_business_rules(raw)
+    if check_business:
+        validate_business_rules(raw)
     return raw

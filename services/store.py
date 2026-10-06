@@ -33,6 +33,8 @@ def sync_meeting(store, final):
             status='not_started', review_status='pending' if item['expected_decision'] == 'human_review' else None,
             reviewed_at=None, history=[dict(timestamp=now(), action='Imported extraction into demo session')])
     store['versions'][mid] = version
+    print('SESSION ITEM COUNT:', len(store['items']), 'meeting:', mid,
+          'batch count:', sum(i['meeting_id'] == mid for i in store['items'].values()))
 
 
 def editable_changes(description, owners, deadline):

@@ -15,7 +15,7 @@ class SummaryTableTests(unittest.TestCase):
             at = make_app()
             final = {'meeting_id': 'TEST', 'items': [
                 {'item_id': 'ITEM001', 'content_type': 'task_candidate',
-                 'description': 'First task', 'owners': ['A', 'B'], 'deadline': None,
+                 'description': 'First task', 'source_excerpt': ['A B: First task'], 'deadline_status':'missing', 'commitment':'explicit', 'owners': ['A', 'B'], 'deadline': None,
                  'depends_on': ['ITEM002'], 'expected_decision': 'confirmed'},
                 {'item_id': 'ITEM002', 'content_type': 'information',
                  'description': 'Background', 'owners': [], 'deadline': None,

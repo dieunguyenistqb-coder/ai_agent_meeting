@@ -21,18 +21,20 @@ class ExtractionServiceTests(unittest.TestCase):
                                                       extractor=lambda p: result['raw_output'])
             self.assertEqual(final.meeting_id,'M1')
             self.assertEqual(final.items,[])
-            self.assertEqual(post.call_args.kwargs, dict(json={'meeting_date':'2026-10-04','transcript':'Transcript'},
-                headers={'ngrok-skip-browser-warning':'1', 'X-API-Key':'test-key'}, timeout=180,allow_redirects=False))
+            self.assertEqual(post.call_args.kwargs, dict(json={'transcript':'Ngày họp: 04-10-2026\n\nTranscript'},
+                headers={'ngrok-skip-browser-warning':'1', 'X-API-Key':'test-key'}, timeout=300,allow_redirects=False))
             gemini.assert_not_called()
 
     @patch.dict('os.environ', {'QWEN_API_URL':'https://example.test/extract','QWEN_API_KEY':''})
     def test_failures_never_fallback(self):
-        for failure in (requests.Timeout('secret'), requests.ConnectionError('secret'), Mock(status_code=503)):
+        for failure, message in ((requests.Timeout('secret'), '>300 giây'),
+                                 (requests.ConnectionError('secret'), 'Không kết nối được Qwen inference API.'),
+                                 (Mock(status_code=503, text='Service unavailable'), 'HTTP 503')):
             with patch('services.extraction_service.requests.post') as post, patch('src.pipeline.call_llm') as gemini:
                 if isinstance(failure, Exception): post.side_effect=failure
                 else: post.return_value=failure
                 with self.assertRaises(QwenConnectionError) as error: self.extract()
-                self.assertIn('Không kết nối được Qwen3-8B', str(error.exception))
+                self.assertIn(message, str(error.exception))
                 self.assertNotIn('secret', str(error.exception))
                 self.assertEqual(post.call_count,1)
                 gemini.assert_not_called()
@@ -60,6 +62,11 @@ class ExtractionServiceTests(unittest.TestCase):
             next(b for b in at.button if b.label=='Run Extraction').click().run()
             self.assertFalse(at.exception)
             post.assert_called_once()
+            self.assertFalse(at.session_state['qwen_request_in_progress'])
+            self.assertFalse(at.session_state['extraction_busy'])
+            at.run()
+            at.run()
+            post.assert_called_once()
             gemini.assert_not_called()
             self.assertTrue(any('Prompt: prompt_v6' in c.value for c in at.caption))
             self.assertEqual(at.session_state['final_object'].items,[])
@@ -77,8 +84,36 @@ class ExtractionServiceTests(unittest.TestCase):
                 with self.assertRaisesRegex(QwenConnectionError, 'không phải JSON'):
                     self.extract()
                 self.assertEqual(post.call_args.kwargs['headers'], {'ngrok-skip-browser-warning':'1'})
-                self.assertEqual(post.call_args.kwargs['timeout'], 180)
-                self.assertIn(str(code), logs.output[0])
-                self.assertIn('text/html', logs.output[0])
-                self.assertIn('x' * 500, logs.output[0])
-                self.assertNotIn('DO_NOT_LOG', logs.output[0])
+                self.assertEqual(post.call_args.kwargs['timeout'], 300)
+                self.assertIn(str(code), '\n'.join(logs.output))
+                self.assertIn('text/html', '\n'.join(logs.output))
+                self.assertIn('x' * 500, '\n'.join(logs.output))
+                self.assertNotIn('DO_NOT_LOG', '\n'.join(logs.output))
+
+    @patch.dict('os.environ', {'QWEN_API_URL':'https://example.test/extract','QWEN_API_KEY':''})
+    def test_latency_logged_on_success_and_timeout(self):
+        response = Mock(status_code=200, json=lambda:dict(ok=True, model_version='v6', prompt_version='prompt_v6', items=[]))
+        for failure in (None, requests.Timeout()):
+            with patch('services.extraction_service.requests.post', return_value=response, side_effect=failure), patch('services.extraction_service.time.perf_counter', side_effect=[10, 157.25]), self.assertLogs('services.extraction_service', level='INFO') as logs:
+                if failure:
+                    with self.assertRaises(QwenConnectionError): self.extract()
+                else:
+                    self.extract()
+                self.assertIn('Qwen request latency: 147.25 seconds', '\n'.join(logs.output))
+                starts = [line for line in logs.output if 'QWEN CALL START' in line]
+                ends = [line for line in logs.output if 'QWEN CALL END' in line]
+                self.assertEqual(len(starts), 1)
+                self.assertEqual(len(ends), 1)
+                self.assertEqual(starts[0].split('request_id=')[1], ends[0].split('request_id=')[1])
+
+    @patch.dict('os.environ', {'QWEN_API_URL':'https://example.test/extract','QWEN_API_KEY':''})
+    def test_exact_url_and_http_error_log(self):
+        response = Mock(status_code=404, text='x' * 300 + 'NOT_LOGGED', json=lambda: {'detail':'Not Found'})
+        with patch('services.extraction_service.requests.post', return_value=response) as post, self.assertLogs('services.extraction_service', level='INFO') as logs:
+            with self.assertRaisesRegex(QwenConnectionError, 'HTTP 404'): self.extract()
+            self.assertEqual(post.call_args.args[0], 'https://example.test/extract')
+            output = '\n'.join(logs.output)
+            self.assertIn('Qwen request URL: https://example.test/extract', output)
+            self.assertIn('status=404', output)
+            self.assertIn('x' * 300, output)
+            self.assertNotIn('NOT_LOGGED', output)

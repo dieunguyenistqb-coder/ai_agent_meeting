@@ -14,7 +14,7 @@ from src import pipeline
 
 def sample(mid='M001'):
     return dict(meeting_id=mid, items=[dict(item_id='ITEM001', description='API', owners=['Nam'],
-        deadline='2026-09-01', source_excerpt=['Nam: làm API'], content_type='task_candidate',
+        deadline='2026-09-01', deadline_status='resolved', source_excerpt=['Nam và Lan: làm API'], content_type='task_candidate',
         commitment='tentative', expected_decision='human_review', review_reason='Chờ xác nhận', depends_on=[])])
 
 

@@ -23,7 +23,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIsInstance(validated, RawMeetingOutput)
         self.assertIsInstance(final, FinalMeetingOutput)
         self.assertEqual(final.meeting_date_evidence, evidence)
-        llm.assert_called_once_with(dict(transcript="Nam: Xin chào.", meeting_id="M001",
+        llm.assert_called_once_with(dict(transcript="Ngày họp: 13-09-2026\n\nNam: Xin chào.", meeting_id="M001",
                                         meeting_date="2026-09-13", meeting_date_evidence=evidence))
         print_mock.assert_not_called()
         write.assert_not_called()
@@ -43,7 +43,7 @@ class PipelineTests(unittest.TestCase):
     def test_api_failure_retains_original_error(self):
         error = RuntimeError("API unavailable")
         with patch.object(pipeline, "call_llm", side_effect=error), patch.object(
-                pipeline, "parse_and_validate") as validator:
+                pipeline, "normalize_extraction") as validator:
             with self.assertRaises(pipeline.PipelineError) as raised:
                 pipeline.process_transcript("Nam: Xin chào.", "M001", None)
         self.assertIs(raised.exception.error, error)

@@ -3,7 +3,7 @@ import logging
 import time
 
 from .llm_client import call_llm
-from .schema_validator import parse_and_validate
+from .extraction_normalization import prepare_transcript, normalize_extraction
 from .decision_policy import apply_decision_policy
 from .schemas import RawMeetingOutput, FinalMeetingOutput
 
@@ -60,7 +60,7 @@ class PipelineError(Exception):
 
 
 def process_transcript(transcript: str, meeting_id: str, meeting_date: str | None,
-                       meeting_date_evidence: dict | None = None, *, extractor=None
+                       meeting_date_evidence: dict | None = None, *, extractor=None, audit=None
                        ) -> tuple[str, RawMeetingOutput, FinalMeetingOutput]:
     """Return (raw text, validated raw model, final model), without file writes.
 
@@ -70,15 +70,22 @@ def process_transcript(transcript: str, meeting_id: str, meeting_date: str | Non
     """
     raw_output = None
     validated_object = None
+    audit = audit if audit is not None else {}
     try:
         if not transcript.strip():
             raise ValueError("Transcript không được để trống")
+        transcript = prepare_transcript(transcript, meeting_date)
         raw_output = (extractor or call_llm_with_retry)({
             "transcript": transcript, "meeting_id": meeting_id,
             "meeting_date": meeting_date, "meeting_date_evidence": meeting_date_evidence,
         })
-        validated_object = parse_and_validate(raw_output)
+        validated_object = normalize_extraction(raw_output, transcript, meeting_id, meeting_date_evidence, audit)
         final_object = apply_decision_policy(validated_object)
+        # Validation gate, separate from the unchanged semantic Decision Policy.
+        for item in final_object.items:
+            if audit.get('items', {}).get(item.item_id, {}).get('source_validation_status') == 'mismatch':
+                item.expected_decision = 'human_review'
+                item.review_reason = 'Trích dẫn của model không khớp transcript. Vui lòng kiểm tra lại nội dung công việc trước khi xác nhận.'
         return raw_output, validated_object, final_object
     except Exception as exc:
         raise PipelineError(exc, raw_output, validated_object) from exc

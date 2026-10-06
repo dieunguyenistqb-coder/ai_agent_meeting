@@ -28,7 +28,8 @@ from run import transcript_metadata
 from src.pipeline import DailyQuotaExceededError, PipelineError, process_transcript
 from src.schema_validator import OutputValidationError
 
-STAGES = ("LLM Extraction", "Schema Validation", "Business Validation", "Decision Policy")
+STAGES = ("LLM Extraction", "Schema Validation", "Dedup / Source Validation",
+          "Meeting Date", "Deadline Resolution", "Business Validation", "Decision Policy")
 TABLE_FIELDS = ("item_id", "content_type", "description", "owners", "deadline",
                 "commitment", "depends_on", "expected_decision")
 DECISION_COLORS = {"confirmed": "green", "human_review": "orange", "not_task": "gray"}
@@ -171,35 +172,47 @@ def friendly_error_message(error):
 
 
 def clear_result():
-    for key in ("raw_output", "validated_object", "final_object", "final_json", "reviewed_json", "error_message", "user_error_message", "result_input", "extraction_model"):
+    st.session_state["item_validation_errors"] = {}
+    st.session_state["open_add_missing_task_form"] = False
+    for key in ("raw_output", "validated_object", "final_object", "final_json", "reviewed_json", "error_message", "user_error_message", "result_input", "extraction_model", "extraction_audit"):
         st.session_state[key] = None
     st.session_state.pipeline_status = dict.fromkeys(STAGES, "Chưa chạy")
 
 
 def failure_status(failure):
-    """Present completed stages from pipeline errors, without revalidating data."""
-    status = dict.fromkeys(STAGES, "Chưa chạy")
+    """Display the failing stage without running validation a second time."""
+    status = dict.fromkeys(STAGES, 'Chưa chạy')
     if failure.raw_output is None:
-        status[STAGES[0]] = "Thất bại"
+        failed = 'LLM Extraction'
+    elif failure.validated_object is not None:
+        failed = 'Decision Policy'
+    elif getattr(failure.error, 'stage', None):
+        failed = failure.error.stage
+    elif isinstance(failure.error, OutputValidationError):
+        cause = failure.error.__cause__
+        failed = 'Schema Validation' if isinstance(cause, (json.JSONDecodeError, ValidationError)) else 'Business Validation'
+        if isinstance(cause, json.JSONDecodeError):
+            status['LLM Extraction'] = 'Thành công'
+            return status
     else:
-        status[STAGES[0]] = "Thành công"
-        if failure.validated_object is not None:
-            status.update({STAGES[1]: "Thành công", STAGES[2]: "Thành công", STAGES[3]: "Thất bại"})
-        elif isinstance(failure.error, OutputValidationError):
-            cause = failure.error.__cause__
-            if isinstance(cause, json.JSONDecodeError):
-                status[STAGES[1]] = "Không chạy: JSON không hợp lệ"
-            elif isinstance(cause, ValidationError):
-                status[STAGES[1]] = "Thất bại"
-            else:
-                status[STAGES[1]] = "Thành công"
-                status[STAGES[2]] = "Thất bại"
-        else:
-            status[STAGES[1]] = "Không hoàn tất"
+        failed = 'Schema Validation'
+    for stage in STAGES:
+        status[stage] = 'Thất bại' if stage == failed else 'Thành công'
+        if stage == failed:
+            break
     return status
 
 
-def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6'):
+def queue_extraction():
+    """Claim one UI action before the next render can process another click."""
+    from uuid import uuid4
+    if st.session_state.get('extraction_busy'):
+        return
+    st.session_state.extraction_busy = True
+    st.session_state['pending_extraction_id'] = str(uuid4())
+
+
+def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6', request_id=None):
     settings = staging.read_settings()
     staging.init_usage()
     if st.session_state.extraction_count >= config.MAX_EXTRACTIONS_PER_SESSION:
@@ -210,6 +223,7 @@ def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6'):
         st.info('Đang xử lý transcript. Vui lòng đợi kết quả.')
         return
     st.session_state.extraction_busy = True
+    st.session_state['qwen_request_in_progress'] = provider == 'qwen_v6'
     st.session_state.extraction_count += 1
     if st.session_state.get('data_source') == 'demo':
         st.session_state.demo_store = new_store()
@@ -222,12 +236,13 @@ def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6'):
                 from src.pipeline import call_llm_with_retry
                 result = extract_meeting(provider, payload['meeting_date'], payload['transcript'],
                     meeting_id=payload['meeting_id'], meeting_date_evidence=payload['meeting_date_evidence'],
-                    gemini_call=call_llm_with_retry, model_version=settings.model)
+                    gemini_call=call_llm_with_retry, model_version=settings.model, request_id=request_id)
                 st.session_state.extraction_model = {k: result[k] for k in
                     ('provider', 'model_version', 'prompt_version')}
                 return result['raw_output']
+            st.session_state.extraction_audit = {}
             raw, validated, final = process_transcript(transcript, meeting_id, meeting_date, evidence,
-                                                        extractor=selected_extractor)
+                                                        extractor=selected_extractor, audit=st.session_state.extraction_audit)
     except PipelineError as failure:
         st.session_state.raw_output = failure.raw_output
         st.session_state.validated_object = failure.validated_object
@@ -247,9 +262,13 @@ def extract(transcript, meeting_id, meeting_date, evidence, provider='qwen_v6'):
             sync_meeting(st.session_state.demo_store, final)
         refresh_reviewed_json(st.session_state)
         st.session_state.pipeline_status = dict.fromkeys(STAGES, "Thành công")
+        if any(i.get('source_validation_status') == 'mismatch'
+               for i in st.session_state.extraction_audit.get('items', {}).values()):
+            st.session_state.pipeline_status['Dedup / Source Validation'] = 'Cảnh báo'
 
     finally:
         st.session_state.extraction_busy = False
+        st.session_state['qwen_request_in_progress'] = False
         lock.release()
 
 
@@ -315,12 +334,21 @@ def render_transcript():
         provider = st.radio('Mô hình trích xuất', ['qwen_v6', 'gemini'], index=0, horizontal=True,
                             format_func=lambda p: {'gemini':'Gemini API', 'qwen_v6':'Qwen3-8B + LoRA V6'}[p],
                             key='extraction_provider', disabled=st.session_state.extraction_busy)
-        if st.button("Run Extraction", type="primary", disabled=(
+        st.button("Run Extraction", type="primary", on_click=queue_extraction, disabled=(
                 exhausted or st.session_state.extraction_busy or
                 not transcript.strip() or not meeting_id.strip() or input_error is not None),
-                width="stretch"):
-            with st.spinner("Đang trích xuất và kiểm tra kết quả…"):
-                extract(*current_input, provider=provider)
+                width="stretch")
+        request_id = st.session_state.pop("pending_extraction_id", None)
+        if request_id:
+            spinner_text = ("Qwen3-8B đang phân tích transcript. Quá trình này có thể mất vài phút..."
+                            if provider == "qwen_v6" else "Đang trích xuất và kiểm tra kết quả…")
+            with st.spinner(spinner_text):
+                try:
+                    extract(*current_input, provider=provider, request_id=request_id)
+                finally:
+                    st.session_state.extraction_busy = False
+                    st.session_state["qwen_request_in_progress"] = False
+            st.rerun()
         if st.session_state.error_message:
             st.error(st.session_state.get("user_error_message") or friendly_error_message(None))
         elif st.session_state.final_object is not None and st.session_state.get("data_source") != "demo":
@@ -355,6 +383,10 @@ def render_batch_submit():
         error = str(exc)
     if error:
         st.warning(error)
+        if st.session_state.get('item_validation_errors'):
+            if st.button('Sửa công việc bị lỗi', key='repair_invalid_items'):
+                st.session_state.navigate_to = 'Human Review'
+                st.rerun()
     if st.button('Xác nhận & gửi vào hệ thống', key='send_to_task_workflow', disabled=error is not None):
         try:
             # Never trust a cached payload or only the button's enabled state.
@@ -394,6 +426,10 @@ def render_results():
         st.caption('Mô hình: Gemini API')
     if st.session_state.get('reviewed_json') is not None:
         st.caption('Đã cập nhật sau Human Review — kết quả hiển thị và JSON gửi n8n bao gồm các thay đổi đã duyệt.')
+    if st.button('+ Thêm công việc bị bỏ sót', key='add_missing_task'):
+        st.session_state['open_add_missing_task_form'] = True
+        st.session_state.navigate_to = 'Human Review'
+        st.rerun()
     from ui.review_state import pending_batch_items
     if pending_batch_items(st.session_state):
         if st.button('Tiếp tục xác nhận', key='continue_review'):
@@ -454,14 +490,16 @@ def render_validation():
             parse_status = 'Thành công'
         except (ValueError, TypeError):
             parse_status = 'Thất bại'
-    stages = {STAGES[0]: stages[STAGES[0]], 'Parse JSON': parse_status, **{k: stages[k] for k in STAGES[1:]}}
-    stages = {stage: status if status in ('Thành công', 'Thất bại', 'Chưa chạy') else ('Chưa chạy' if status.startswith('Không chạy') else 'Thất bại') for stage, status in stages.items()}
-    for column, stage in zip(st.columns(5), stages):
+    stages = {STAGES[0]: stages[STAGES[0]], 'Parse JSON': parse_status, **{k: stages.get(k, "Chưa chạy") for k in STAGES[1:]}}
+    stages = {stage: status if status in ('Thành công', 'Thất bại', 'Chưa chạy', 'Cảnh báo') else ('Chưa chạy' if status.startswith('Không chạy') else 'Thất bại') for stage, status in stages.items()}
+    for column, stage in zip(st.columns(len(stages)), stages):
         with column:
             st.markdown(f"**{stage}**")
             status = stages[stage]
             if status == "Thành công":
                 st.success(status)
+            elif status == "Cảnh báo":
+                st.warning(status)
             elif status in ("Thất bại", "Không hoàn tất"):
                 st.error(status)
             else:
@@ -506,6 +544,10 @@ def render_validation():
             st.error(st.session_state.error_message)
         else:
             st.caption("Không có lỗi được ghi nhận.")
+        diagnostics = (st.session_state.get('extraction_audit') or {}).get('diagnostics', [])
+        if diagnostics:
+            st.markdown('**Dedup / Source diagnostics**')
+            st.json(diagnostics)
         with st.expander('Sử dụng API trong phiên'):
             st.text(f'Extraction: {st.session_state.extraction_count} / {config.MAX_EXTRACTIONS_PER_SESSION}\n'
                     f'Lần gọi Gemini (gồm retry): {st.session_state.gemini_call_count}')
